@@ -26,6 +26,11 @@
       <artifactId>rhq-metrics-core</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <dependency>
+      <groupId>org.codehaus.jackson</groupId>
+      <artifactId>jackson-mapper-asl</artifactId>
+      <version>1.9.12</version>
+    </dependency>
 
     <dependency>
       <groupId>org.jboss.resteasy</groupId>
@@ -57,7 +62,6 @@
       <version>${resteasy.version}</version>
       <scope>provided</scope>
     </dependency>
-
     <dependency>
       <groupId>javax.servlet</groupId>
       <artifactId>javax.servlet-api</artifactId>

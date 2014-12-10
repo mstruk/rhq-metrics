@@ -1,15 +1,19 @@
 package org.rhq.metrics.restServlet;
 
-import static java.lang.Double.NaN;
 import static java.util.Arrays.asList;
 
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 import javax.inject.Inject;
 import javax.ws.rs.Consumes;
@@ -23,11 +27,7 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.container.AsyncResponse;
 import javax.ws.rs.container.Suspended;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.GenericEntity;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
+import javax.ws.rs.core.*;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.FutureCallback;
@@ -37,6 +37,12 @@ import com.wordnik.swagger.annotations.Api;
 import com.wordnik.swagger.annotations.ApiOperation;
 import com.wordnik.swagger.annotations.ApiParam;
 
+import org.codehaus.jackson.JsonFactory;
+import org.codehaus.jackson.map.ObjectMapper;
+import org.codehaus.jackson.map.ObjectWriter;
+import org.codehaus.jackson.map.annotate.JsonSerialize;
+import org.rhq.metrics.core.EventLogService;
+import org.rhq.metrics.core.LogEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,6 +70,19 @@ public class MetricHandler {
     @Inject
     private MetricsService metricsService;
 
+    @Inject
+    private EventLogService eventLogService;
+
+    private HashSet<String> ids = new HashSet<>();
+    {
+        ids.add("requests");
+        ids.add("notifications");
+        ids.add("unique-users");
+        ids.add("bandwidth");
+        ids.add("bandwidth-by-service");
+        ids.add("bandwidth-by-path-");
+    }
+
     public MetricHandler() {
         if (logger.isDebugEnabled()) {
             logger.debug("MetricHandler instantiated");
@@ -84,6 +103,18 @@ public class MetricHandler {
 		return builder.build();
 	}
 
+    @GET
+    @Path("/time")
+    @Produces({ "application/json"})
+    @ApiOperation(value = "Returns the current time in UTC millis.", responseClass = "Map<String,Long>")
+    public Response time() {
+
+        TimeValue reply = new TimeValue(System.currentTimeMillis());
+
+        Response.ResponseBuilder builder = Response.ok(reply).type(MediaType.APPLICATION_JSON_TYPE).cacheControl(CacheControl.valueOf("no-cache"));
+        return builder.build();
+    }
+
     @POST
     @Path("/metrics/{id}")
     @Consumes({"application/json","application/xml"})
@@ -102,7 +133,7 @@ public class MetricHandler {
         Set<RawNumericMetric> rawSet = new HashSet<>(dataPoints.size());
         for (IdDataPoint dataPoint : dataPoints) {
             RawNumericMetric rawMetric = new RawNumericMetric(dataPoint.getId(), dataPoint.getValue(),
-                dataPoint.getTimestamp());
+                dataPoint.getTimestamp(), dataPoint.getTags());
             rawSet.add(rawMetric);
         }
 
@@ -336,7 +367,7 @@ public class MetricHandler {
                                         BucketDataPoint point;
                                         if (tmpList == null) {
                                             if (!skipEmpty) {
-                                                point = new BucketDataPoint(id, 1000L * i * bucketWidthSeconds , NaN, NaN, NaN);
+                                                point = new BucketDataPoint(id, 1000L * i * bucketWidthSeconds , 0, 0, 0);
                                                 points.add(point);
                                             }
                                         } else {
@@ -355,7 +386,7 @@ public class MetricHandler {
                                         if (tmpList!=null) {
                                             for (RawNumericMetric metric : tmpList) {
                                                 point = new BucketDataPoint(id, // TODO could be simple data points
-                                                    1000L * i * bucketWidthSeconds, NaN,metric.getValue(),NaN);
+                                                    1000L * i * bucketWidthSeconds, 0,metric.getValue(),0);
                                                 point.setValue(metric.getValue());
                                                 points.add(point);
                                             }
@@ -387,6 +418,274 @@ public class MetricHandler {
     }
 
     @GZIP
+    @POST
+    @Path("/event-log")
+    @ApiOperation("Add a collection of log events.")
+    @Consumes({"application/json","application/xml"})
+    @Produces({"application/json","application/xml","application/vnd.rhq.wrapped+json"})
+    public void getLogMetricsForIds(@Suspended final AsyncResponse asyncResponse, Collection<LogEvent> events) {
+
+        for (LogEvent event: events) {
+            eventLogService.addEvent(event);
+        }
+        Response jaxrs = Response.ok().type(MediaType.APPLICATION_JSON_TYPE).build();
+        asyncResponse.resume(jaxrs);
+    }
+
+    @GZIP
+    @GET
+    @Path("/event-log")
+    @ApiOperation("Return metric values for event log metrics specified via query params. If no metric id is specified, the raw event log data " +
+            "for a time period of [now-1min,now] is returned.")
+    @Produces({"application/json","application/xml","application/vnd.rhq.wrapped+json"})
+    public void getLogMetricsForIds(@Suspended final AsyncResponse asyncResponse,
+                             @ApiParam("Metrics id to return data for") @QueryParam("id") final String id,
+                             @ApiParam(value = "Start time in millis since epoch") @QueryParam("start") String start,
+                             @ApiParam(value = "End time in millis since epoch") @QueryParam("end") String end,
+                             @QueryParam("tag") List<String> tags,
+                             @ApiParam(value = "If non-zero: number of buckets to partition the data into. Raw data otherwise", defaultValue = "0")
+                             @QueryParam("buckets") final int numberOfBuckets,
+                             @QueryParam("bucketWidthSeconds") final int bucketWidthSeconds,
+                             @ApiParam("If true, empty buckets are not returned.") @QueryParam("skipEmpty") @DefaultValue("false") final boolean skipEmpty,
+                             @QueryParam("bucketCluster") @DefaultValue("true") final boolean bucketCluster,
+                             @Context HttpHeaders headers) {
+
+        final Long finalStart = parseTime(start, System.currentTimeMillis() - 60000);  // Now-1min
+        final Long finalEnd = parseTime(end, System.currentTimeMillis());
+
+        ListenableFuture<Boolean> idExistsFuture = Futures.immediateFuture(checkMetricId(id));
+        Futures.addCallback(idExistsFuture, new FutureCallback<Boolean>() {
+            @Override
+            public void onSuccess(Boolean result) {
+                if (!result) {
+                    StringValue val = new StringValue("Metric with id [" + id + "] not found. ");
+                    asyncResponse.resume(Response.status(404).type("application/json").entity(val).build());
+                    return;
+                }
+
+                final ListenableFuture<List<LogEvent>> future = eventLogService.findData(finalStart, finalEnd, getFilterForId(id, tags));
+
+                Futures.addCallback(future, new FutureCallback<List<LogEvent>>() {
+                    @Override
+                    public void onSuccess(List<LogEvent> events) {
+                        if (numberOfBuckets == 0) {
+                            // get all events within the specified time interval
+                            GenericEntity<List<LogEvent>> list = new GenericEntity<List<LogEvent>>(events) {};
+                            Response jaxrs = Response.ok(list).type("application/json").build();
+                            asyncResponse.resume(jaxrs);
+                            return;
+                        } else {
+                            // User wants data in buckets
+                            // if metric for id performs segmentation then result contains more than one datapoint list
+                            Map<String, List<BucketDataPoint>> result = new HashMap<>();
+
+                            if (bucketWidthSeconds == 0) {
+                                // we will have numberOfBuckets buckets over the whole time span
+                                long bucketsize = (finalEnd - finalStart) / numberOfBuckets;
+                                for (int i = 0; i < numberOfBuckets; i++) {
+                                    long startTime = finalStart + i*bucketsize;
+
+                                    Map<String, BucketDataPoint> datapoints = createLogEventPointInSimpleBucket(id, startTime, bucketsize, events);
+                                    for (Map.Entry<String, BucketDataPoint> entry: datapoints.entrySet()) {
+                                        BucketDataPoint point = entry.getValue();
+                                        if (!skipEmpty || !point.isEmpty()) {
+                                            List<BucketDataPoint> points = result.get(entry.getKey());
+                                            if (points == null) {
+                                                points = new ArrayList(numberOfBuckets);
+                                                result.put(entry.getKey(), points);
+                                            }
+                                            points.add(point);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // we will have numberOfBuckets buckets, but with a fixed width. Buckets will thus
+                                // be reused over time after (numberOfBuckets*bucketWidthSeconds seconds)
+                                long totalLength = (long) numberOfBuckets * bucketWidthSeconds * 1000L;
+
+                                // find the minimum ts
+                                long minTs = Long.MAX_VALUE;
+                                for (LogEvent event : events) {
+                                    if (event.getTimestamp() < minTs) {
+                                        minTs = event.getTimestamp();
+                                    }
+                                }
+
+                                TLongObjectMap<List<LogEvent>> buckets = new TLongObjectHashMap<>(numberOfBuckets);
+
+                                for (LogEvent event : events) {
+                                    long bucket = event.getTimestamp() - minTs;
+                                    bucket = bucket % totalLength;
+                                    bucket = bucket / (bucketWidthSeconds * 1000L);
+                                    List<LogEvent> tmpList = buckets.get(bucket);
+                                    if (tmpList == null) {
+                                        tmpList = new ArrayList<>();
+                                        buckets.put(bucket, tmpList);
+                                    }
+                                    tmpList.add(event);
+                                }
+
+                                // finally perform missing datapoint creation
+                                if (bucketCluster) {
+                                    // Now that stuff is in buckets - we need to "flatten" them out.
+                                    // As we collapse stuff from a lot of input timestamps into some
+                                    // buckets, we only use a relative time for the bucket timestamps.
+                                    for (int i = 0; i < numberOfBuckets; i++) {
+                                        List<LogEvent> tmpList = buckets.get(i);
+                                        if (tmpList != null) {
+                                            Map<String, BucketDataPoint> datapoints = getBucketEventLogDataPoint(id,
+                                                    1000L * i * bucketWidthSeconds, bucketWidthSeconds*1000L, tmpList);
+                                            for (Map.Entry<String, BucketDataPoint> entry: datapoints.entrySet()) {
+                                                BucketDataPoint point = entry.getValue();
+                                                if (!skipEmpty || !point.isEmpty()) {
+                                                    List<BucketDataPoint> points = result.get(entry.getKey());
+                                                    if (points == null) {
+                                                        points = new ArrayList(numberOfBuckets);
+                                                        result.put(entry.getKey(), points);
+                                                    }
+                                                    points.add(point);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // We want to keep the raw values, but put them into clusters anyway
+                                    // without collapsing them into a single min/avg/max tuple
+                                    Function<LogEvent, Double> valueFunction = getValueFunctionForMetric(id);
+                                    Function<LogEvent, Object> groupingFunction = getGroupingFunctionForMetric(id);
+
+                                    for (int i = 0; i < numberOfBuckets; i++) {
+                                        List<LogEvent> tmpList = buckets.get(i);
+                                        BucketDataPoint point;
+                                        if (tmpList != null) {
+                                            for (LogEvent event : tmpList) {
+                                                double value = valueFunction.apply(event);
+                                                point = new BucketDataPoint(id, // TODO could be simple data points
+                                                        1000L * i * bucketWidthSeconds, 0, value, 0);
+                                                point.setValue(value);
+
+                                                Object segment = groupingFunction != null ? groupingFunction.apply(event) : null;
+                                                String segmentKey = segment != null ? String.valueOf(segment) : null;
+
+                                                List<BucketDataPoint> points = result.get(segmentKey);
+                                                if (points == null) {
+                                                    points = new ArrayList(numberOfBuckets);
+                                                    result.put(segmentKey, points);
+                                                }
+                                                points.add(point);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // finally perform missing datapoint creation
+                                if (bucketCluster) {
+                                    for (int i = 0; i < numberOfBuckets; i++) {
+                                        List<LogEvent> tmpList = buckets.get(i);
+                                        BucketDataPoint point;
+                                        if (tmpList == null) {
+                                            if (!skipEmpty) {
+                                                point = new BucketDataPoint(id, 1000L * i * bucketWidthSeconds, 0, 0, 0);
+                                                for (List<BucketDataPoint> points: result.values()) {
+                                                    points.add(point);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // fix null key:
+                            if (result.containsKey(null)) {
+                                result.put("_default", result.remove(null));
+                            }
+
+                            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                            JsonFactory factory = new JsonFactory();
+                            try {
+                                ObjectMapper mapper = new ObjectMapper(factory);
+                                mapper.setSerializationInclusion(JsonSerialize.Inclusion.NON_NULL);
+                                //mapper.setSerializationInclusion(JsonSerialize.Inclusion.NON_EMPTY);
+                                ObjectWriter writer = mapper.writer().withDefaultPrettyPrinter();
+                                writer.writeValue(baos, result);
+
+                                Response jaxrs = Response.ok(baos.toByteArray()).type("application/json").build();
+                                asyncResponse.resume(jaxrs);
+
+                            } catch (Exception e) {
+                                Response jaxrs = Response.serverError().type("application/json").build();
+                                asyncResponse.resume(jaxrs);
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(Throwable t) {
+                        asyncResponse.resume(t);
+                    }
+                });
+            }
+
+            @Override
+            public void onFailure(Throwable t) {
+                asyncResponse.resume(t);
+            }
+        });
+    }
+
+    private boolean checkMetricId(String id) {
+        if (id == null) {
+            return true;
+        }
+        for (String rid: ids) {
+            if (rid.equals(id)) {
+                return true;
+            }
+            if (rid.endsWith("-") && id.startsWith(rid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private long parseTime(String time, long defaultValue) {
+        long millis;
+        try {
+            millis = Long.valueOf(time);
+        } catch (Exception e) {
+            millis = defaultValue;
+        }
+        if (millis < 0) {
+            millis = System.currentTimeMillis() + millis;
+        }
+        return millis;
+    }
+
+    private Predicate<LogEvent> getFilterForId(String id, List<String> tags) {
+        Predicate<LogEvent> p = e -> checkTags(e, tags);
+        if (id == null) {
+            return p;
+        }
+        if (id.equals("notifications")) {
+            p = p.and(e -> e.getNotification() != null);
+        }
+        return p.and(e -> e.containsTag("path:/" + e.getApplication()));
+    }
+
+    private boolean checkTags(LogEvent e, List<String> tags) {
+        if (tags == null) {
+            return true;
+        }
+        for (String tag: tags) {
+            if (!e.containsTag(tag)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+
+    @GZIP
     @GET
     @Path("/metrics")
     @Produces({"application/json","application/xml","application/vnd.rhq.wrapped+json"})
@@ -408,7 +707,6 @@ public class MetricHandler {
                 Response.ResponseBuilder builder = Response.ok(list);
 
                 asyncResponse.resume(builder.build());
-
             }
 
             @Override
@@ -471,27 +769,122 @@ public class MetricHandler {
         return getBucketDataPoint(id, startTime, bucketMetrics);
     }
 
+    private Map<String, BucketDataPoint> createLogEventPointInSimpleBucket(String id, long startTime, long bucketsize,
+                                                      List<LogEvent> events) {
+        List<LogEvent> bucketMetrics = new ArrayList<>(events.size());
+        // Find matching metrics
+        for (LogEvent event : events) {
+            if (event.getTimestamp() >= startTime && event.getTimestamp() < startTime + bucketsize) {
+                bucketMetrics.add(event);
+            }
+        }
+
+        return getBucketEventLogDataPoint(id, startTime, bucketsize, bucketMetrics);
+    }
+
+    private Map<String, BucketDataPoint> getBucketEventLogDataPoint(String id, long startTime, long duration, List<LogEvent> bucketMetrics) {
+
+        Function<LogEvent, Double> valueProvider = getValueFunctionForMetric(id);
+        Function<LogEvent, Object> groupingFunction = getGroupingFunctionForMetric(id);
+        Function<Map<String, BucketDataPoint>, BucketDataPoint> collectingFunction = getCollectingFunction(id, startTime, duration);
+
+        Map<Object, List<LogEvent>> separated = new HashMap<>();
+        if (groupingFunction != null) {
+            // split metrics by groupingFunction
+            for (LogEvent event: bucketMetrics) {
+                Object key = groupingFunction.apply(event);
+                List<LogEvent> sublist = separated.get(key);
+                if (sublist == null) {
+                    sublist = new LinkedList<LogEvent>();
+                    separated.put(key, sublist);
+                }
+                sublist.add(event);
+            }
+        } else {
+            separated.put(null, bucketMetrics);
+        }
+
+        Map<String, BucketDataPoint> result = new HashMap<>();
+
+        for (Map.Entry<Object,List<LogEvent>> item: separated.entrySet()) {
+
+            String key = item.getKey() != null ? String.valueOf(item.getKey()) : null;
+
+            double min = 0;
+            double max = 0;
+            double sum = 0;
+
+            for (LogEvent event: item.getValue()) {
+
+                double value = valueProvider.apply(event);
+                if (value > max) {
+                    max = value;
+                }
+                if (value < min) {
+                    min = value;
+                }
+                sum += value;
+            }
+            result.put(key, new SegmentDataPoint(id, key, startTime, duration, item.getValue().size(), sum, min, max));
+        }
+
+        if (collectingFunction != null) {
+            BucketDataPoint collected = collectingFunction.apply(result);
+            if (collected != null) {
+                result.clear();
+                result.put(null, collected);
+            }
+        }
+        return result;
+    }
+
+    private Function<LogEvent, Double> getValueFunctionForMetric(String id) {
+        if (id.equals("bandwidth") || id.equals("bandwidth-by-service") || id.startsWith("bandwidth-by-path-")) {
+            return e -> (double) e.getTotalBytes();
+        }
+        return e -> 1.0;
+    }
+
+    private Function<LogEvent, Object> getGroupingFunctionForMetric(String id) {
+        if (id.equals("bandwidth-by-service")) {
+            return e -> e.getPathPrefix(2);
+        } else if (id.equals("unique-users")) {
+            return LogEvent::getUserId;
+        } else if (id.startsWith("bandwidth-by-path-")) {
+            // what level of depth do we group by? - extract it from id
+            return e -> {
+                String [] parsed = id.split("-");
+                int depth = Integer.parseInt(parsed[parsed.length-1]);
+                return e.getPathPrefix(depth);
+            };
+        }
+        return null;
+    }
+
+    private Function<Map<String, BucketDataPoint>, BucketDataPoint> getCollectingFunction(String id, long startTime, long duration) {
+        if (id.equals("unique-users")) {
+            return m -> {
+                return new SegmentDataPoint(id, null, startTime, duration, m.keySet().size(), m.keySet().size(), 1.0, 1.0);
+            };
+        }
+        return null;
+    }
+
     private BucketDataPoint getBucketDataPoint(String id, long startTime, List<RawNumericMetric> bucketMetrics) {
-        Double min = null;
-        Double max = null;
+        double min = 0;
+        double max = 0;
         double sum = 0;
         for (RawNumericMetric raw : bucketMetrics) {
-            if (max==null || raw.getValue() > max) {
+            if (raw.getValue() > max) {
                 max = raw.getValue();
             }
-            if (min==null || raw.getValue() < min) {
+            if (raw.getValue() < min) {
                 min = raw.getValue();
             }
             sum += raw.getValue();
         }
-        double avg = bucketMetrics.size()>0 ? sum / bucketMetrics.size() : NaN;
-        if (min == null) {
-            min = NaN;
-        }
-        if (max == null) {
-            max = NaN;
-        }
-        BucketDataPoint result = new BucketDataPoint(id,startTime,min, avg,max);
+        double avg = bucketMetrics.size() > 0 ? sum / bucketMetrics.size() : 0;
+        BucketDataPoint result = new BucketDataPoint(id, startTime, min, avg, max);
 
         return result;
     }

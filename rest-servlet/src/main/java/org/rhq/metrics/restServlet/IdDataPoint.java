@@ -14,6 +14,7 @@ import com.wordnik.swagger.annotations.ApiProperty;
 public class IdDataPoint extends DataPoint {
 
     private String id;
+    private String [] tags;
 
     public IdDataPoint() {
     }
@@ -30,5 +31,14 @@ public class IdDataPoint extends DataPoint {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    @ApiProperty("Tags of the metric")
+    public String[] getTags() {
+        return tags;
+    }
+
+    public void setTags(String [] tags) {
+        this.tags = tags;
     }
 }

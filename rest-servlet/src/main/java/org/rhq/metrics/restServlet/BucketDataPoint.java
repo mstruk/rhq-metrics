@@ -1,9 +1,11 @@
 package org.rhq.metrics.restServlet;
 
 import javax.xml.bind.annotation.XmlRootElement;
+import javax.xml.bind.annotation.XmlTransient;
 
 import com.wordnik.swagger.annotations.ApiClass;
 import com.wordnik.swagger.annotations.ApiProperty;
+import org.codehaus.jackson.annotate.JsonIgnoreProperties;
 
 /**
  * A point in time with some data for min/avg/max to express
@@ -13,6 +15,7 @@ import com.wordnik.swagger.annotations.ApiProperty;
 @ApiClass(description = "A bucket is a time range with multiple data items represented by min/avg/max values" +
     "for that time span.")
 @XmlRootElement
+@JsonIgnoreProperties({"empty"})
 public class BucketDataPoint extends IdDataPoint {
 
     private double min;
@@ -58,8 +61,9 @@ public class BucketDataPoint extends IdDataPoint {
         this.avg = avg;
     }
 
+    @XmlTransient
     public boolean isEmpty() {
-        return Double.isNaN(avg) || Double.isNaN(max) || Double.isNaN(min);
+        return min == 0 && max == 0 && avg == 0;
     }
 
     @Override
