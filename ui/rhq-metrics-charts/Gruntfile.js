@@ -94,20 +94,18 @@ module.exports = function(grunt) {
           browsers: ['PhantomJS']
         }
       },
-//      ngdocs: {
-//        options: {
-//          title: 'RHQ Metrics Documentation',
-//          dest: 'dist/docs',
-//          scripts: ['lib/rhqm-charts/components/jquery/jquery.js',
-//            'lib/rhqm-charts/components/bootstrap/dist/js/bootstrap.js',
-//            'angular.js',
-//            'dist/rhqm-charts.js',
-//            'lib/rhqm-charts/dist/js/rhqm-charts.js'],
-//          html5Mode: false,
-//          styles: ['lib/rhqm-charts/dist/css/rhqm-charts.css']
-//        },
-//        all: ['src/**/*.js']
-//      },
+      ngdocs: {
+        options: {
+          title: 'RHQ Metrics Documentation',
+          dest: 'dist/docs',
+          scripts: ['lib/jquery/dist/jquery.js',
+            'lib/bootstrap/dist/js/bootstrap.js',
+            'lib/angular/angular.js',
+            'dist/rhqm-charts.js'],
+          html5Mode: false
+        },
+        all: ['src/**/*.js']
+      },
 //      ngtemplates: {
 //        options: {
 //          htmlmin: {

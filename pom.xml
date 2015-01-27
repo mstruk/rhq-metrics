@@ -29,7 +29,7 @@
     <resteasy.version>3.0.7.Final</resteasy.version>
     <trove4j.version>3.0.3</trove4j.version>
 
-    <version.wildfly>8.1.0.Final</version.wildfly>
+    <version.wildfly>8.2.0.Final</version.wildfly>
     <junit.version>4.8.2</junit.version>
     <findbugs.version>3.0.0</findbugs.version>
 
