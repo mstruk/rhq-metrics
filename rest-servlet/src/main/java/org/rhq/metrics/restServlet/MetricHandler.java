@@ -13,7 +13,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
-import java.util.function.Predicate;
 
 import javax.inject.Inject;
 import javax.ws.rs.Consumes;
@@ -41,17 +40,11 @@ import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.map.ObjectMapper;
 import org.codehaus.jackson.map.ObjectWriter;
 import org.codehaus.jackson.map.annotate.JsonSerialize;
-import org.rhq.metrics.core.EventLogService;
-import org.rhq.metrics.core.LogEvent;
+import org.rhq.metrics.core.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.jboss.resteasy.annotations.GZIP;
-
-import org.rhq.metrics.core.Counter;
-import org.rhq.metrics.core.MetricsService;
-import org.rhq.metrics.core.NumericMetric;
-import org.rhq.metrics.core.RawNumericMetric;
 
 import gnu.trove.map.TLongObjectMap;
 import gnu.trove.map.hash.TLongObjectHashMap;
@@ -71,17 +64,10 @@ public class MetricHandler {
     private MetricsService metricsService;
 
     @Inject
-    private EventLogService eventLogService;
+    private EventLogStorage eventLogStorage;
 
-    private HashSet<String> ids = new HashSet<>();
-    {
-        ids.add("requests");
-        ids.add("notifications");
-        ids.add("unique-users");
-        ids.add("bandwidth");
-        ids.add("bandwidth-by-service");
-        ids.add("bandwidth-by-path-");
-    }
+    @Inject
+    private EventLogService eventLogService;
 
     public MetricHandler() {
         if (logger.isDebugEnabled()) {
@@ -426,7 +412,7 @@ public class MetricHandler {
     public void getLogMetricsForIds(@Suspended final AsyncResponse asyncResponse, Collection<LogEvent> events) {
 
         for (LogEvent event: events) {
-            eventLogService.addEvent(event);
+            eventLogStorage.addEvent(event);
         }
         Response jaxrs = Response.ok().type(MediaType.APPLICATION_JSON_TYPE).build();
         asyncResponse.resume(jaxrs);
@@ -453,7 +439,7 @@ public class MetricHandler {
         final Long finalStart = parseTime(start, System.currentTimeMillis() - 60000);  // Now-1min
         final Long finalEnd = parseTime(end, System.currentTimeMillis());
 
-        ListenableFuture<Boolean> idExistsFuture = Futures.immediateFuture(checkMetricId(id));
+        ListenableFuture<Boolean> idExistsFuture = Futures.immediateFuture(eventLogService.checkMetricId(id));
         Futures.addCallback(idExistsFuture, new FutureCallback<Boolean>() {
             @Override
             public void onSuccess(Boolean result) {
@@ -463,7 +449,7 @@ public class MetricHandler {
                     return;
                 }
 
-                final ListenableFuture<List<LogEvent>> future = eventLogService.findData(finalStart, finalEnd, getFilterForId(id, tags));
+                final ListenableFuture<List<LogEvent>> future = eventLogStorage.findData(finalStart, finalEnd, eventLogService.getFilterForId(id, tags));
 
                 Futures.addCallback(future, new FutureCallback<List<LogEvent>>() {
                     @Override
@@ -551,8 +537,8 @@ public class MetricHandler {
                                 } else {
                                     // We want to keep the raw values, but put them into clusters anyway
                                     // without collapsing them into a single min/avg/max tuple
-                                    Function<LogEvent, Double> valueFunction = getValueFunctionForMetric(id);
-                                    Function<LogEvent, Object> groupingFunction = getGroupingFunctionForMetric(id);
+                                    Function<LogEvent, Double> valueFunction = eventLogService.getValueFunctionForMetric(id);
+                                    Function<LogEvent, Object> groupingFunction = eventLogService.getGroupingFunctionForMetric(id);
 
                                     for (int i = 0; i < numberOfBuckets; i++) {
                                         List<LogEvent> tmpList = buckets.get(i);
@@ -633,21 +619,6 @@ public class MetricHandler {
         });
     }
 
-    private boolean checkMetricId(String id) {
-        if (id == null) {
-            return true;
-        }
-        for (String rid: ids) {
-            if (rid.equals(id)) {
-                return true;
-            }
-            if (rid.endsWith("-") && id.startsWith(rid)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private long parseTime(String time, long defaultValue) {
         long millis;
         try {
@@ -659,29 +630,6 @@ public class MetricHandler {
             millis = System.currentTimeMillis() + millis;
         }
         return millis;
-    }
-
-    private Predicate<LogEvent> getFilterForId(String id, List<String> tags) {
-        Predicate<LogEvent> p = e -> checkTags(e, tags);
-        if (id == null) {
-            return p;
-        }
-        if (id.equals("notifications")) {
-            p = p.and(e -> e.getNotification() != null);
-        }
-        return p.and(e -> e.containsTag("path:/" + e.getApplication()));
-    }
-
-    private boolean checkTags(LogEvent e, List<String> tags) {
-        if (tags == null) {
-            return true;
-        }
-        for (String tag: tags) {
-            if (!e.containsTag(tag)) {
-                return false;
-            }
-        }
-        return true;
     }
 
 
@@ -784,9 +732,9 @@ public class MetricHandler {
 
     private Map<String, BucketDataPoint> getBucketEventLogDataPoint(String id, long startTime, long duration, List<LogEvent> bucketMetrics) {
 
-        Function<LogEvent, Double> valueProvider = getValueFunctionForMetric(id);
-        Function<LogEvent, Object> groupingFunction = getGroupingFunctionForMetric(id);
-        Function<Map<String, BucketDataPoint>, BucketDataPoint> collectingFunction = getCollectingFunction(id, startTime, duration);
+        Function<LogEvent, Double> valueProvider = eventLogService.getValueFunctionForMetric(id);
+        Function<LogEvent, Object> groupingFunction = eventLogService.getGroupingFunctionForMetric(id);
+        Function<Map<String, BucketDataPoint>, BucketDataPoint> collectingFunction = eventLogService.getCollectingFunction(id, startTime, duration);
 
         Map<Object, List<LogEvent>> separated = new HashMap<>();
         if (groupingFunction != null) {
@@ -836,38 +784,6 @@ public class MetricHandler {
             }
         }
         return result;
-    }
-
-    private Function<LogEvent, Double> getValueFunctionForMetric(String id) {
-        if (id.equals("bandwidth") || id.equals("bandwidth-by-service") || id.startsWith("bandwidth-by-path-")) {
-            return e -> (double) e.getTotalBytes();
-        }
-        return e -> 1.0;
-    }
-
-    private Function<LogEvent, Object> getGroupingFunctionForMetric(String id) {
-        if (id.equals("bandwidth-by-service")) {
-            return e -> e.getPathPrefix(2);
-        } else if (id.equals("unique-users")) {
-            return LogEvent::getUserId;
-        } else if (id.startsWith("bandwidth-by-path-")) {
-            // what level of depth do we group by? - extract it from id
-            return e -> {
-                String [] parsed = id.split("-");
-                int depth = Integer.parseInt(parsed[parsed.length-1]);
-                return e.getPathPrefix(depth);
-            };
-        }
-        return null;
-    }
-
-    private Function<Map<String, BucketDataPoint>, BucketDataPoint> getCollectingFunction(String id, long startTime, long duration) {
-        if (id.equals("unique-users")) {
-            return m -> {
-                return new SegmentDataPoint(id, null, startTime, duration, m.keySet().size(), m.keySet().size(), 1.0, 1.0);
-            };
-        }
-        return null;
     }
 
     private BucketDataPoint getBucketDataPoint(String id, long startTime, List<RawNumericMetric> bucketMetrics) {

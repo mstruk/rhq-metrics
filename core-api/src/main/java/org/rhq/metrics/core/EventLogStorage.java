@@ -15,7 +15,7 @@ import java.util.function.Predicate;
  *
  * @author <a href="mailto:marko.strukelj@gmail.com">Marko Strukelj</a>
  */
-public interface EventLogService {
+public interface EventLogStorage {
 
     /**
      * Return true if metric with specified id exists

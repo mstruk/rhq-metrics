@@ -1,6 +1,6 @@
 package org.rhq.metrics.core;
 
-import org.rhq.metrics.impl.memory.MemoryEventLogService;
+import org.rhq.metrics.impl.memory.MemoryEventLogStorage;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -16,11 +16,11 @@ import static org.rhq.metrics.core.LogEventQuery.distinct;
 /**
  *  @author <a href="mailto:marko.strukelj@gmail.com">Marko Strukelj</a>
  */
-public class EventLogServiceTest {
+public class EventLogStorageTest {
 
     private final long startTime = System.currentTimeMillis();
 
-    private final MemoryEventLogService events = new MemoryEventLogService();
+    private final MemoryEventLogStorage events = new MemoryEventLogStorage();
 
     @BeforeClass
     public void initEvents() {

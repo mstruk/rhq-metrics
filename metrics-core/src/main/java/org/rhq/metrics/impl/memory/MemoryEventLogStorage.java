@@ -4,7 +4,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import org.rhq.metrics.core.EventLogQueryParams;
 import org.rhq.metrics.core.EventLogQueryResult;
-import org.rhq.metrics.core.EventLogService;
+import org.rhq.metrics.core.EventLogStorage;
 import org.rhq.metrics.core.LogEvent;
 import org.rhq.metrics.core.LogEventQuery;
 
@@ -22,7 +22,7 @@ import java.util.stream.Stream;
 /**
  *  @author <a href="mailto:marko.strukelj@gmail.com">Marko Strukelj</a>
  */
-public class MemoryEventLogService implements EventLogService {
+public class MemoryEventLogStorage implements EventLogStorage {
 
     /** Limit to prevent in-memory event log store to OOM the runtime */
     private static final int MAX_SIZE = 500000;
